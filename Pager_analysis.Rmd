@@ -1,0 +1,375 @@
+---
+title: "Renal pager data"
+author: "J Ritchie"
+date: "09/12/2016"
+output: ioslides_presentation
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+
+setwd("~/Git/Pager_analysis/")
+
+#DEFINE PACKAGES
+require(readxl)
+require(dplyr)
+require(tidyr)
+require(readr)
+require(lubridate)
+
+All_messages <- read_excel("~/Dropbox/Pager data/outbox_all_messages%20James%20Ritchie.xlsx")
+
+#Minor column tidy
+All_messages$From<-NULL
+
+#Select only renal pages
+#set vector of renal numbers (note only one used here as EDA demonstrates all messages duplicated to both numbers)
+Renal<-"'447623372487"
+
+#select only these from the master DF
+Renal_pages<-All_messages[All_messages$To %in% Renal,] 
+
+#exclude failed pages
+Renal_pages<-subset(Renal_pages, Renal_pages$Status!="Invalid Number")
+
+#then drop the number identifier 
+Renal_pages$To<-NULL
+
+#drop initial DF for memory efficiency
+rm(All_messages)
+```
+
+## Introduction
+
+```{r, echo=FALSE}
+Date_min<-min(Renal_pages$`Date Time`)
+Date_min<-format(Date_min, '%d %B, %Y')
+
+Date_max<-max(Renal_pages$`Date Time`)
+Date_max<-format(Date_max, '%d %B, %Y')
+
+Total_pages<-nrow(Renal_pages)
+
+```
+
+
+This is a summary document relating to pager activity for the renal baton.
+
+The data do not account for calls to
+
+-- Personal pagers / mobiles
+
+-- Consultant on call
+
+These data cover the period between `r Date_min` and `r Date_max` and describe `r Total_pages` pages sent out (note this number included multiple pages / reminders for individual encounters).
+
+```{r , echo=FALSE}
+Status_summary<-summary(Renal_pages$Status)
+```
+
+*****
+
+The system utilises a two-way pager system for calls originated via swtichboard. Doctors can acknowledge calls to aid communication with waiting referrers. Overall acknowledgement is as follows:
+
+
+```{r , echo=FALSE}
+
+Status_table<-Renal_pages[,3]
+
+table(Status_table)
+```
+
+This, representative of all calls including those from within SRFT
+
+
+```{r, echo=FALSE, include=FALSE}
+
+#Sepraate message into self contained units to allow extraction of numbers calling
+Renal_pages<- Renal_pages %>% separate(Message, c("Time_value", "Part_2", "Part_3", "Part_4", "Part_5", "Part_6", "Part_7", "Part_8", "Part_9", "Part_10", "Part_11", "Part_12", "Part_13", "Part_14", "Part_15", "Part_16"), " ")
+
+#Function to remove character values
+  Text_remove<- function(x) {
+    x<<-as.numeric(gsub("\\D", "", (x)))              
+  }
+
+Renal_pages[3:17]<-lapply(Renal_pages[3:17], Text_remove)
+
+#Unite the multiple columns and then remove the NA data
+Renal_pages<-unite(Renal_pages, "Number", c(3:17))
+
+Renal_pages[3]<-Text_remove(Renal_pages$Number)
+
+Renal_pages$Number<-as.numeric(Renal_pages$Number)
+
+
+#NOW need to exclude internal numbers
+#1 - Keep numbers with >5 digits as they represent full numbers e.g. 0161123456....
+#2 - Keep numbers with 686 originator
+
+#1 - 
+Renal_pages$Full_number<-ifelse(Renal_pages$Number>70000,1,0)
+
+#2 - 
+Renal_pages$First_three<-substr(Renal_pages$Number, start=1, stop=3)
+Renal_pages$Switch<-ifelse(Renal_pages$First_three=="686",1,0)
+
+Renal_pages$External<-ifelse(Renal_pages$Full_number=="1"|Renal_pages$Switch=="1",1,0)
+
+Renal_pages$Full_number<-NULL
+Renal_pages$Switch<-NULL
+Renal_pages$First_three<-NULL
+
+#Reduce size of external numbers to aid data handling
+#First remove incomplete cases
+Renal_pages<-Renal_pages %>% drop_na()
+
+Renal_pages$Number<-ifelse(Renal_pages$Number<70000,Renal_pages$Number, 12345)
+
+#Create external call DF
+External<-subset(Renal_pages, Renal_pages$External=="1")
+
+External_n<-nrow(External)
+
+Total_pages_Renal<-nrow(Renal_pages)
+
+External_pct<-round(((External_n/Total_pages_Renal)*100), digits=1)
+#Create internal call DF
+
+Internal<-subset(Renal_pages, Renal_pages$External=="0")
+
+Internal_n<-nrow(Internal)
+
+Internal_pct<-round(((Internal_n/Total_pages_Renal)*100), digits=1)
+
+```
+Some pages did not have numeric data attached e.g. "Caller still waiting". As these cannot be linked to a specific episode they have been discarded
+
+*****
+
+The division of calls origins is:
+
+-- Internal `r Internal_n` (`r Internal_pct`%)
+
+-- External `r External_n` (`r External_pct`%)
+
+
+
+Of the external pages, where the two-way functionality has value, responses were given as follows:
+
+```{r , echo=FALSE}
+
+External_status_table<-External[,4]
+
+table(External_status_table)
+```
+
+## External calls
+
+```{r, echo=FALSE}
+
+#Now need to look at numbers in relation to time stamp to undertand how many multiple pages
+
+#Split date / time into separate columns after duplication
+External$Date_Time<-External$'Date Time'
+External<- External %>% separate('Date Time', c("Date", "Time"), " ")
+External$Time_value<-NULL
+
+#Order calls by NUMBER then DATE_TIME
+
+External<- External[order(External$Number, External$Date_Time),]
+
+#to do - group by number, then mutate a new column based on the lag in timestamp
+#Calculate the minutes difference between calls
+External$mins <- unlist(tapply(External$Date_Time, INDEX = External$Number,FUN = function(x) c(0, `units<-`(diff(x), "mins"))))
+#this does the whole column, resetting at number breaks - does not account for days etc - don't think this will influence the results.
+
+#Have d/w switch; timeout break for calls being returned to them ins 15 minutes
+External$Repeat_page<-ifelse(External$mins=="0"|External$mins>15,0,1)
+
+Total_repeat<-sum(External$Repeat_page)
+
+Repeat_pct<-round(((Total_repeat/(nrow(External)))*100), digits=1)
+```
+
+ Of the `r External_n` pages made in relation to external calls, `r Total_repeat` (`r Repeat_pct`%) were repeat calls due to the response taking > 15 mins
+ 
+ 
+```{r, echo=FALSE}
+
+External$Hour<-hour(External$Date_Time)
+External$Hour<-as.numeric(External$Hour)
+
+d <- density(External$Hour)
+plot(d, main="Density plot of external referral timing")
+polygon(d, col="red", border="blue")
+```
+
+
+## Externals - office hours
+```{r, echo=FALSE}
+
+Day_hours<-(9:17)
+
+Daytime_external<-External[External$Hour %in% Day_hours,] 
+
+d <- density(Daytime_external$Hour)
+plot(d, main="Density plot of external referral timing (office hours)")
+polygon(d, col="blue", border="red")
+
+```
+
+
+
+## Externals - on call hours
+```{r, echo=FALSE}
+
+Oncall_hours<-(c(1:8,18:23))
+
+OOH_external<-External[External$Hour %in% Oncall_hours,] 
+
+d <- density(OOH_external$Hour)
+plot(d, main="Density plot of external call (on call hours)")
+polygon(d, col="green", border="red")
+```
+
+
+##Externals - repeated calls
+
+```{r, echo=FALSE}
+
+Repeat_externals<-External[External$Repeat_page %in% 1,] 
+
+
+#Repeat_externals<-subset(External, External$Repeat_page==1)
+
+Repeat_externals_day<-Repeat_externals[Repeat_externals$Hour %in% Day_hours,] 
+
+
+d <- density(Repeat_externals_day$Hour)
+plot(d, main="Density plot of repeated external pages (office hours)")
+polygon(d, col="yellow", border="blue")
+
+```
+
+
+## Internal calls
+
+```{r, echo=FALSE}
+
+#Now need to look at numbers in relation to time stamp to undertand how many multiple pages
+
+#Split date / time into separate columns after duplication
+Internal$Date_Time<-Internal$'Date Time'
+Internal<- Internal %>% separate('Date Time', c("Date", "Time"), " ")
+Internal$Time_value<-NULL
+
+#Order calls by NUMBER then DATE_TIME
+
+Internal<- Internal[order(Internal$Number, Internal$Date_Time),]
+
+#to do - group by number, then mutate a new column based on the lag in timestamp
+#Calculate the minutes difference between calls
+Internal$mins <- unlist(tapply(Internal$Date_Time, INDEX = Internal$Number,FUN = function(x) c(0, `units<-`(diff(x), "mins"))))
+#this does the whole column, resetting at number breaks - does not account for days etc - don't think this will influence the results.
+
+#Have d/w switch; timeout break for calls being returned to them ins 15 minutes
+Internal$Repeat_page<-ifelse(Internal$mins=="0"|Internal$mins>15,0,1)
+
+Total_repeat_i<-sum(Internal$Repeat_page)
+
+Repeat_pct_i<-round(((Total_repeat_i/(nrow(Internal)))*100), digits=1)
+```
+
+ Of the `r Internal_n` pages made in relation to external calls, `r Total_repeat_i` (`r Repeat_pct_i`%) were repeat calls due to the response taking > 15 mins
+ 
+ 
+```{r, echo=FALSE}
+
+Internal$Hour<-hour(Internal$Date_Time)
+Internal$Hour<-as.numeric(Internal$Hour)
+
+d <- density(Internal$Hour)
+plot(d, main="Density plot of internal referral timing")
+polygon(d, col="red", border="blue")
+```
+
+## Internals - office hours
+```{r, echo=FALSE}
+
+Day_hours<-(9:17)
+
+Daytime_internal<-Internal[Internal$Hour %in% Day_hours,] 
+
+d <- density(Daytime_internal$Hour)
+plot(d, main="Density plot of internal referral timing (office hours)")
+polygon(d, col="blue", border="red")
+
+```
+
+## Internals - on call hours
+```{r, echo=FALSE}
+
+Oncall_hours<-(c(1:8,18:23))
+
+OOH_internal<-Internal[Internal$Hour %in% Oncall_hours,] 
+
+d <- density(OOH_internal$Hour)
+plot(d, main="Density plot of internal calls (on call hours)")
+polygon(d, col="green", border="red")
+```
+
+## Internals - repeated calls
+```{r, echo=FALSE}
+
+Repeat_internals<-Internal[Internal$Repeat_page %in% 1,] 
+
+
+#Repeat_externals<-subset(External, External$Repeat_page==1)
+
+Repeat_internals_day<-Repeat_internals[Repeat_internals$Hour %in% Day_hours,] 
+
+
+d <- density(Repeat_internals_day$Hour)
+plot(d, main="Density plot of repeated internal pages (office hours)")
+polygon(d, col="yellow", border="blue")
+
+```
+
+## Limitations
+
+-- Assumptions about nature of repeated calls
+
+-- Cannot account for other contemporaneous activiy
+
+-- Consultant / personal calls excluded
+
+-- Origin of calls not addressed
+
+-- Data do not capture time to response
+
+## Conclusions
+
+-- Afternoon session has highest number of calls
+
+-- Both internal and external calls are greatest in the afternoon
+
+-- Need for additional support 1400-1600?
+
+-- Excluding repeat calls (15 mins window), there were 2095 referrals to the baton
+
+-- This is ~1050 calls per month
+
+-- Assuming 30 calendar days this is 35 pages / day (higher than 12 months ago - had been 30). Activity may be increasing
+
+-- No 'quiet time' for baton
+
+-- Poor use of 2-ways functionality to communicate with switchboard
+
+## Further work
+-- Need to examine day to day variation (previous data show much lower number on Sunday)
+
+-- Address how many were made around repeated call events (consider if non-response was likely due to other calls)
+
+-- Consider system to allow time to response audit (likely JD driven)
+
+
